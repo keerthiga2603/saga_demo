@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Order workflow demo</title>
+<style>
+  :root {
+    --ink: #1a2b2a;
+    --ink-soft: #5c706e;
+    --paper: #eceee9;
+    --card: #ffffff;
+    --line: #d2d7d1;
+    --confirmed: #1d6b4c;
+    --cancelled: #a03030;
+    --paid: #8a6212;
+    --created: #4a5c70;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 2.5rem 1.5rem 4rem;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+
+  .wrap { max-width: 1020px; margin: 0 auto; }
+
+  header { border-bottom: 2px solid var(--ink); padding-bottom: 1.1rem; margin-bottom: 2rem; }
+  h1 { margin: 0 0 .3rem; font-size: 1.9rem; font-weight: 650; letter-spacing: -.015em; }
+  header p { margin: 0; color: var(--ink-soft); max-width: 62ch; }
+
+  .cols { display: grid; grid-template-columns: 340px 1fr; gap: 1.75rem; align-items: start; }
+
+  .panel {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1.25rem 1.3rem 1.4rem;
+  }
+  .panel + .panel { margin-top: 1.5rem; }
+  h2 { margin: 0 0 1rem; font-size: 1rem; font-weight: 650; }
+
+  label { display: block; font-size: .87rem; color: var(--ink-soft); margin-bottom: .3rem; }
+  select, input {
+    width: 100%; padding: .5rem .6rem; margin-bottom: .95rem;
+    border: 1px solid var(--line); border-radius: 3px;
+    font: inherit; font-size: .95rem; background: #fbfcfa; color: var(--ink);
+  }
+  select:focus, input:focus, button:focus-visible {
+    outline: 2px solid var(--created); outline-offset: 1px;
+  }
+
+  button {
+    font: inherit; font-size: .95rem; cursor: pointer;
+    padding: .55rem 1rem; border-radius: 3px; border: 1px solid var(--ink);
+    background: var(--ink); color: #fff;
+  }
+  button.ghost { background: transparent; color: var(--ink); }
+  button:hover { opacity: .88; }
+
+  .hint { font-size: .85rem; color: var(--ink-soft); margin: .2rem 0 0; }
+
+  table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  th, td { text-align: left; padding: .5rem .4rem; border-bottom: 1px solid var(--line); }
+  th { font-weight: 600; font-size: .82rem; color: var(--ink-soft); }
+  td.num, th.num { text-align: right; }
+
+  .status { font-weight: 650; }
+  .CONFIRMED { color: var(--confirmed); }
+  .CANCELLED { color: var(--cancelled); }
+  .PAID { color: var(--paid); }
+  .CREATED, .PAYMENT_FAILED { color: var(--created); }
+
+  ol.steps { list-style: none; counter-reset: s; margin: 0; padding: 0; }
+  ol.steps li {
+    counter-increment: s; position: relative;
+    padding: .55rem 0 .55rem 2.2rem; border-bottom: 1px dashed var(--line);
+  }
+  ol.steps li:last-child { border-bottom: none; }
+  ol.steps li::before {
+    content: counter(s); position: absolute; left: 0; top: .55rem;
+    width: 1.5rem; height: 1.5rem; border-radius: 50%;
+    border: 1px solid var(--line); background: #f4f6f2;
+    display: grid; place-items: center; font-size: .8rem; color: var(--ink-soft);
+  }
+  li.ok::before { border-color: var(--confirmed); color: var(--confirmed); }
+  li.fail::before { border-color: var(--cancelled); color: var(--cancelled); }
+  li.compensate::before { content: "↺"; border-color: var(--paid); color: var(--paid); }
+  li small { display: block; color: var(--ink-soft); font-size: .84rem; }
+
+  .empty { color: var(--ink-soft); font-size: .92rem; margin: 0; }
+
+  @media (max-width: 820px) { .cols { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Order workflow demo</h1>
+    <p>Place an order and watch the four saga steps run. Ask for more units than the
+       warehouse holds and the workflow refunds the payment and cancels the order
+       instead of letting stock go negative.</p>
+  </header>
+
+  <div class="cols">
+    <div>
+      <div class="panel">
+        <h2>Place an order</h2>
+
+        <label for="product">Product</label>
+        <select id="product"></select>
+
+        <label for="quantity">Quantity</label>
+        <input id="quantity" type="number" min="1" value="1">
+
+        <label for="price">Price per unit (Rs.)</label>
+        <input id="price" type="number" min="1" value="1500">
+
+        <button id="place">Place order</button>
+        <button id="reset" class="ghost">Reset demo</button>
+        <p class="hint">Stock starts at 10 units per product.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Warehouse stock</h2>
+        <table>
+          <thead><tr><th>Product</th><th class="num">In stock</th></tr></thead>
+          <tbody id="stock"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <h2>What happened</h2>
+        <ol class="steps" id="steps"></ol>
+        <p class="empty" id="stepsEmpty">Place an order to see the steps.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Orders</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>#</th><th>Product</th><th class="num">Qty</th>
+              <th class="num">Amount</th><th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="orders"></tbody>
+        </table>
+        <p class="empty" id="ordersEmpty">No orders yet.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let products = [];
+
+async function loadProducts() {
+  products = await (await fetch('/products')).json();
+
+  $('product').innerHTML = products
+    .map(p => `<option value="${p.id}">${p.name} (#${p.id})</option>`).join('');
+
+  $('stock').innerHTML = products
+    .map(p => `<tr><td>${p.name}</td><td class="num">${p.stock}</td></tr>`).join('');
+}
+
+function productName(id) {
+  const p = products.find(p => p.id === id);
+  return p ? p.name : '#' + id;
+}
+
+async function loadOrders() {
+  const orders = await (await fetch('/orders')).json();
+  $('ordersEmpty').style.display = orders.length ? 'none' : 'block';
+  $('orders').innerHTML = orders.map(o => `
+    <tr>
+      <td>${o.id}</td>
+      <td>${productName(o.productId)}</td>
+      <td class="num">${o.quantity}</td>
+      <td class="num">Rs.${o.amount}</td>
+      <td class="status ${o.status}">${o.status}</td>
+    </tr>`).join('');
+}
+
+function showSteps(order) {
+  const confirmed = order.status === 'CONFIRMED';
+  const steps = [
+    { cls: 'ok', text: `Order #${order.id} created`,
+      note: 'Saved in one local transaction, status CREATED.' },
+    { cls: 'ok', text: `Payment of Rs.${order.amount} taken`,
+      note: 'Status moves to PAID. This step is committed on its own.' },
+    confirmed
+      ? { cls: 'ok', text: `${order.quantity} unit(s) reserved`,
+          note: 'Stock was sufficient, so the invariant holds.' }
+      : { cls: 'fail', text: 'Inventory reservation refused',
+          note: 'Reserving would push stock below zero, which the invariant forbids.' }
+  ];
+
+  if (confirmed) {
+    steps.push({ cls: 'ok', text: 'Order confirmed', note: 'Final status CONFIRMED.' });
+  } else {
+    steps.push({ cls: 'compensate', text: `Payment of Rs.${order.amount} refunded`,
+      note: 'A committed payment cannot roll back, so it is undone by a compensating action.' });
+    steps.push({ cls: 'fail', text: 'Order cancelled', note: 'Final status CANCELLED.' });
+  }
+
+  $('stepsEmpty').style.display = 'none';
+  $('steps').innerHTML = steps.map(s =>
+    `<li class="${s.cls}">${s.text}<small>${s.note}</small></li>`).join('');
+}
+
+$('place').addEventListener('click', async () => {
+  const quantity = Number($('quantity').value);
+  const price = Number($('price').value);
+
+  if (!quantity || quantity < 1) { alert('Enter a quantity of 1 or more.'); return; }
+
+  const response = await fetch('/orders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      productId: Number($('product').value),
+      quantity: quantity,
+      amount: quantity * price
+    })
+  });
+
+  if (!response.ok) { alert('The server rejected the order. Check the console log.'); return; }
+
+  const order = await response.json();
+  showSteps(order);
+  await loadProducts();
+  await loadOrders();
+});
+
+$('reset').addEventListener('click', async () => {
+  await fetch('/reset', { method: 'POST' });
+  $('steps').innerHTML = '';
+  $('stepsEmpty').style.display = 'block';
+  await loadProducts();
+  await loadOrders();
+});
+
+loadProducts().then(loadOrders);
+</script>
+</body>
+</html>
