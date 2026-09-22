@@ -1,0 +1,409 @@
+The last 5 — overall progression
+Experiment	Concept	Main idea	Improvement over previous
+6	CQS	Separate read and write operations	Makes service responsibilities clearer
+7	CQRS	Separate command and query services	Takes CQS further into separate service responsibilities
+8	Idempotency	Prevent duplicate processing	Makes repeated requests/events safe
+9	Retry	Try failed operations again	Handles temporary failures
+10	Reconciliation	Detect unfinished/inconsistent states	Provides recovery/checking after failures
+Experiment 6 — CQS
+What is it?
+
+CQS = Command Query Separation.
+
+The idea is simple:
+
+Command → changes data
+Query → only reads data
+
+Your source gives createOrder() as the command and getOrder() as the query.
+
+What I did
+
+I created:
+
+OrderCqsService
+
+Inside it:
+
+createOrder()
+        ↓
+changes/saves Order
+
+and
+
+getOrder()
+        ↓
+only reads Order
+Flow
+Client
+  |
+  | createOrder()
+  ↓
+OrderCqsService
+  |
+  ↓
+Repository
+  |
+  ↓
+Database
+
+For reading:
+
+Client
+  |
+  | getOrder(id)
+  ↓
+OrderCqsService
+  |
+  ↓
+Repository
+  |
+  ↓
+Database
+What improves?
+
+Before this, one service could mix different responsibilities.
+
+Now we clearly distinguish:
+
+"I want to change something"
+versus
+"I only want to see something."
+
+So the code becomes easier to understand and maintain.
+
+Experiment 7 — CQRS
+What is it?
+
+CQRS = Command Query Responsibility Segregation.
+
+This goes one step further than CQS.
+
+Instead of merely separating methods, we separate the services responsible for writing and reading.
+
+Your source specifically creates:
+
+OrderCommandService
+OrderQueryService
+
+What I did
+
+I created:
+
+OrderCommandService
+
+for:
+
+create()
+
+and:
+
+OrderQueryService
+
+for:
+
+findById()
+findAll()
+Structure
+             Client
+               |
+       ┌───────┴────────┐
+       ↓                ↓
+Command Service    Query Service
+       ↓                ↓
+   Write data        Read data
+       ↓                ↓
+   Repository       Repository
+What improves from Experiment 6?
+
+Experiment 6:
+
+One service
+ ├── create()
+ └── get()
+
+Experiment 7:
+
+Command Service
+ └── create()
+
+Query Service
+ ├── findById()
+ └── findAll()
+
+So CQRS gives stronger separation than CQS.
+
+This is useful when an application becomes larger because the read side and write side can evolve independently.
+
+Experiment 8 — Idempotency
+What is it?
+
+Suppose the same payment event arrives twice.
+
+Without idempotency:
+
+Payment event
+     ↓
+Payment processed
+     ↓
+Payment event arrives again
+     ↓
+Payment processed AGAIN ❌
+
+That could create duplicate effects.
+
+The purpose of idempotency is:
+
+The same event should not produce the same effect more than once.
+
+This is exactly the purpose described in your source.
+
+What I did
+
+I created:
+
+PaymentEventConsumer
+
+and a set:
+
+private final Set<String> processedEvents = new HashSet<>();
+
+When an event arrives:
+
+Is eventId already processed?
+       |
+    ┌──┴──┐
+   YES    NO
+    |      |
+ Ignore   Process
+          |
+       Store ID
+Example
+
+First request:
+
+eventId = EVT100
+
+Output:
+
+Processing payment for order 1
+
+Same event again:
+
+eventId = EVT100
+
+Output:
+
+Duplicate event ignored
+What improves from Experiment 7?
+
+CQRS was about separating responsibilities.
+
+Now we address a different problem:
+
+What if the same operation arrives multiple times?
+
+So the system becomes safer against duplicate messages/events.
+
+Experiment 9 — Retry
+What is it?
+
+Sometimes an operation doesn't fail permanently.
+
+For example:
+
+Try inventory update
+       ↓
+Temporary failure
+       ↓
+Try again
+
+Your source uses a maximum of 3 attempts.
+
+What I did
+
+I created:
+
+RetryService
+
+with:
+
+attempt = 0
+
+while attempts < 3
+
+The process is:
+
+Attempt 1
+   ↓
+Success? ── YES → Done
+   |
+   NO
+   ↓
+Attempt 2
+   ↓
+Success? ── YES → Done
+   |
+   NO
+   ↓
+Attempt 3
+   ↓
+Success? ── YES → Done
+   |
+   NO
+   ↓
+Final failure
+Example
+
+If inventory reservation temporarily fails:
+
+Retry attempt: 1
+Retry attempt: 2
+Retry attempt: 3
+Inventory update failed after retries
+
+If it succeeds on attempt 2:
+
+Retry attempt: 1
+Retry attempt: 2
+Inventory updated
+What improves from Experiment 8?
+
+Experiment 8 handles:
+
+duplicate operations
+
+Experiment 9 handles:
+
+temporary failures
+
+So now the system doesn't immediately give up when an operation fails.
+
+Experiment 10 — Reconciliation
+What is it?
+
+This is the final and most recovery-oriented experiment.
+
+Sometimes a workflow stops in the middle.
+
+For example:
+
+Order Created
+     ↓
+Payment Successful
+     ↓
+Inventory step didn't complete
+     ↓
+??? 
+
+Now the order is stuck in:
+
+PAID
+
+instead of:
+
+CONFIRMED
+
+Your source describes reconciliation as checking unfinished orders and recovering workflows that remain in an intermediate state.
+
+What I did
+
+I created:
+
+ReconciliationService
+
+with:
+
+reconcile(Order order)
+
+It checks the order status.
+
+If:
+
+PAID
+
+it reports:
+
+Order is paid but not confirmed.
+Check inventory workflow.
+
+If:
+
+CANCELLED
+
+it reports:
+
+Verify that compensation/refund completed.
+Flow
+Check Order
+     ↓
+What is its state?
+     |
+ ┌───┴─────────────┐
+ ↓                 ↓
+PAID           CANCELLED
+ ↓                 ↓
+Check           Verify
+inventory       refund
+workflow        compensation
+What improves from Experiment 9?
+
+Retry tries to make the operation succeed again.
+
+Reconciliation is different.
+
+It asks:
+
+"After everything that happened, is the business process actually in a consistent state?"
+
+So it acts as a checking/recovery mechanism for unfinished workflows.
+
+The progression you can explain to mam
+
+This is the most important part to understand:
+
+Experiment 6
+CQS
+   ↓
+Separate reading and writing
+   ↓
+Experiment 7
+CQRS
+   ↓
+Separate command and query services
+   ↓
+Experiment 8
+Idempotency
+   ↓
+Prevent duplicate effects
+   ↓
+Experiment 9
+Retry
+   ↓
+Handle temporary failures
+   ↓
+Experiment 10
+Reconciliation
+   ↓
+Find and recover unfinished states
+
+So the chapter is gradually making the application more robust.
+
+In one sentence each
+
+6 – CQS:
+"I separate operations that change data from operations that only read data."
+
+7 – CQRS:
+"I separate the command and query responsibilities into different services."
+
+8 – Idempotency:
+"If I receive the same event again, I don't perform the same effect twice."
+
+9 – Retry:
+"If an operation temporarily fails, I try it again."
+
+10 – Reconciliation:
+"If the workflow gets stuck, I check its state and identify what needs to be recovered."
+
+And these five fit into the broader Chapter 4 progression described in your document: starting with local transaction/invariant concepts and moving toward failure handling, Saga, compensation, CQS/CQRS, retry, idempotency, and reconciliation

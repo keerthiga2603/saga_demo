@@ -1,0 +1,17 @@
+com\example\chapter4\repository\OrderRepository.class
+com\example\chapter4\repository\ProductRepository.class
+com\example\chapter4\service\SagaService.class
+com\example\chapter4\model\Order.class
+com\example\chapter4\Chapter4Application.class
+com\example\chapter4\service\InventoryService.class
+com\example\chapter4\service\OrderService.class
+com\example\chapter4\controller\OrderController.class
+com\example\chapter4\service\PaymentService.class
+com\example\chapter4\model\Product.class
+com\example\chapter4\service\OrderCommandService.class
+com\example\chapter4\service\ReconciliationService.class
+com\example\chapter4\service\RetryService.class
+com\example\chapter4\service\PaymentEventConsumer.class
+com\example\chapter4\service\OrderCqsService.class
+com\example\chapter4\controller\Chapter4Controller.class
+com\example\chapter4\service\OrderQueryService.class
