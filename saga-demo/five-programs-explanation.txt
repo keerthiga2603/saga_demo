@@ -1,0 +1,358 @@
+===========================================================
+ ORDER - PAYMENT - INVENTORY SAGA
+ Programs 1 to 5  |  Explanation and viva notes
+===========================================================
+
+Project name : saga-demo
+Stack        : Spring Boot 3.3.4, Spring Web, Spring Data JPA, H2 (in memory)
+Run command  : mvn spring-boot:run     ->   http://localhost:8080
+
+The five programs are not five separate applications. They are five
+layers of ONE workflow:
+
+    Create Order  ->  Make Payment  ->  Reserve Inventory  ->  Confirm Order
+
+If the inventory step fails after payment already succeeded, the
+workflow refunds the payment and cancels the order.
+
+
+-----------------------------------------------------------
+ QUICK TABLE - WHAT EACH PROGRAM IS
+-----------------------------------------------------------
+
+ No | Concept                  | Class              | One-line job
+----|--------------------------|--------------------|---------------------------------
+ 1  | Local ACID transaction   | OrderService       | Save an order atomically
+ 2  | Business invariant       | InventoryService   | Stock must never go negative
+ 3  | Payment + compensation   | PaymentService     | Take money, and undo it
+ 4  | Saga orchestration       | SagaService        | Run the 4 steps, handle failure
+ 5  | REST controller          | OrderController    | Expose the workflow over HTTP
+
+
+===========================================================
+ PROGRAM 1 - LOCAL ACID TRANSACTION
+ File: service/OrderService.java
+===========================================================
+
+WHAT IT DOES
+  saveOrder() sets the status to CREATED and saves the order. The whole
+  method is marked @Transactional, so everything inside it commits
+  together or rolls back together.
+
+THE CONCEPT
+  ACID = Atomicity, Consistency, Isolation, Durability. This works
+  because there is ONE database and ONE transaction manager. Spring
+  opens the transaction when the method starts and commits when it
+  returns normally. If an exception is thrown, it rolls back and the
+  order is never saved.
+
+KEY POINT FOR VIVA
+  This is the simplest and strongest kind of consistency, but it only
+  works inside a single service and a single database. The moment a
+  second service or a payment gateway is involved, you cannot use it
+  any more. That limitation is exactly why Programs 3 and 4 exist.
+
+
+===========================================================
+ PROGRAM 2 - BUSINESS INVARIANT
+ File: service/InventoryService.java
+===========================================================
+
+WHAT IT DOES
+  reserveStock(productId, quantity) checks the stock first. If stock is
+  less than the quantity asked for, it returns false and changes
+  nothing. Otherwise it subtracts the quantity and saves.
+  restoreStock() adds the quantity back.
+
+THE CONCEPT
+  An invariant is a business rule that must be true at all times. Here
+  the rule is: stock must never become negative. The rule is enforced
+  inside the service that OWNS the product data - nowhere else. No
+  other class is allowed to touch stock directly.
+
+DIFFERENCE FROM PROGRAM 1
+  Program 1 asks "did the save succeed technically?"
+  Program 2 asks "is the business rule still satisfied?"
+  Both use @Transactional, but Program 2 adds a rule the database alone
+  would not enforce. The database would happily store stock = -40.
+  The check in reserveStock() is what prevents it.
+
+KEY POINT FOR VIVA
+  Notice it returns false instead of throwing an exception. Running out
+  of stock is a normal business outcome, not a system error, so the
+  saga must be able to react to it and compensate.
+
+
+===========================================================
+ PROGRAM 3 - PAYMENT AND COMPENSATION
+ File: service/PaymentService.java
+===========================================================
+
+WHAT IT DOES
+  makePayment(amount) - prints "Payment successful: Rs.___" and
+  returns true. This simulates an external payment gateway.
+  refund(amount) - prints "Payment refunded: Rs.___".
+
+THE CONCEPT
+  A compensating transaction. Once money has actually moved, you cannot
+  roll it back - the payment gateway is a separate system with its own
+  committed transaction. The only way to undo it is a NEW business
+  operation that reverses the effect. That is what refund() is.
+
+DIFFERENCE FROM PROGRAMS 1 AND 2
+  This is the first class with NO @Transactional annotation, and that
+  is deliberate, not an oversight. It is not talking to our database at
+  all. Rollback is impossible here, so undo has to be done by hand.
+
+  Program 1  -> undo = automatic rollback by the database
+  Program 3  -> undo = a second, opposite operation written by us
+
+KEY POINT FOR VIVA
+  Rollback and compensation are not the same thing. Rollback erases
+  history as if nothing happened. Compensation leaves both records in
+  place - the payment AND the refund - and the net business effect is
+  zero. A real bank statement would show both lines.
+
+
+===========================================================
+ PROGRAM 4 - SAGA ORCHESTRATION
+ File: service/SagaService.java
+===========================================================
+
+WHAT IT DOES
+  placeOrder() runs the four steps in order:
+    Step 1  save order with status CREATED
+    Step 2  call PaymentService; on success set status PAID
+    Step 3  call InventoryService.reserveStock()
+    Step 4  set status CONFIRMED
+
+  If step 3 returns false:
+    - call paymentService.refund()   (compensation)
+    - set status CANCELLED
+    - return
+
+THE CONCEPT
+  A saga is a sequence of local transactions. Each step commits on its
+  own. There is no single big transaction wrapping all four. When a
+  later step fails, the earlier committed steps are undone by running
+  their compensating actions in reverse.
+
+  This is ORCHESTRATION style - one central class (SagaService) tells
+  every other service what to do. The alternative is choreography,
+  where services react to each other's events with no central
+  coordinator.
+
+DIFFERENCE FROM THE EARLIER PROGRAMS
+  Programs 1, 2 and 3 are each a single step. Program 4 is the first
+  class that COORDINATES them. It is also the first place where failure
+  handling lives.
+
+  Look carefully: placeOrder() itself has NO @Transactional annotation.
+  This is the single most important detail in the whole project. If you
+  put @Transactional on it, the saga would be wrong - the refund and
+  the database work would get tangled into one transaction, and the
+  intermediate PAID status would never actually be visible.
+
+STATUS FLOW
+  Success  : CREATED -> PAID -> CONFIRMED
+  Failure  : CREATED -> PAID -> CANCELLED   (refund printed in between)
+
+WHERE EVENTUAL CONSISTENCY APPEARS
+  Between step 2 committing and the refund finishing, the order says
+  PAID while the inventory says nothing was reserved. For that short
+  window the system disagrees with itself. It becomes consistent again
+  once compensation completes. That gap IS eventual consistency.
+
+
+===========================================================
+ PROGRAM 5 - REST CONTROLLER
+ File: controller/OrderController.java
+===========================================================
+
+WHAT IT DOES
+  @RestController with @RequestMapping("/orders"). A single
+  @PostMapping method takes an Order from the request body, passes it
+  to sagaService.placeOrder(), and returns the finished order as JSON.
+
+THE CONCEPT
+  The entry point. It contains no business logic at all - it only
+  converts HTTP into a method call and the result back into JSON.
+
+DIFFERENCE FROM PROGRAM 4
+  Program 4 decides WHAT happens. Program 5 only decides HOW it is
+  reached from outside. If you deleted the controller, the workflow
+  would still be correct; you would just have no way to trigger it from
+  a browser.
+
+KEY POINT FOR VIVA
+  The response is always HTTP 200, even for a cancelled order. A
+  cancelled order is a successful run of the workflow - the saga did
+  exactly what it was supposed to do. It is not a server error.
+
+
+===========================================================
+ HOW THE FIVE FIT TOGETHER
+===========================================================
+
+  Browser / Postman
+        |
+        v
+  [5] OrderController          entry point, HTTP -> Java
+        |
+        v
+  [4] SagaService              coordinates the steps, handles failure
+        |         |         |
+        v         v         v
+  [1] Order   [3] Payment  [2] Inventory
+      Service      Service      Service
+   (local ACID)  (compensate) (invariant)
+        |                         |
+        +------> H2 database <----+
+
+  Progression of ideas:
+    1 - consistency is easy inside one database
+    2 - but business rules need explicit protection
+    3 - and some steps cannot be rolled back at all
+    4 - so a coordinator sequences them and undoes them manually
+    5 - and all of it is exposed through one HTTP endpoint
+
+
+===========================================================
+ CHANGES I MADE TO THE ORIGINAL CODE
+===========================================================
+
+The five program classes are UNCHANGED from the document. The logic,
+method names and print statements are exactly as given. What was added
+was only the wiring needed to make it a runnable project.
+
+1. package statements and imports
+   The document shows classes without them. Every file needed
+   "package com.example.saga.___;" and its imports. No logic changed.
+
+2. SagaDemoApplication.java   (new file)
+   The @SpringBootApplication main class. Nothing runs without it.
+
+3. pom.xml   (new file)
+   Maven build file pulling in Spring Web, Spring Data JPA and H2.
+
+4. application.properties   (new file)
+   H2 in-memory database settings, ddl-auto=update so the tables are
+   created automatically, show-sql=true so queries print in the
+   console, and the H2 console enabled on /h2-console.
+
+5. config/DataLoader.java   (new file)
+   A CommandLineRunner that inserts two products at startup, each with
+   10 units of stock:
+        101 - Wireless Mouse
+        102 - Mechanical Keyboard
+   Without this, every order would fail with NoSuchElementException,
+   because reserveStock() calls findById().orElseThrow() and the
+   product table would be empty.
+
+6. controller/ViewController.java   (new file)
+   GET /orders, GET /products and POST /reset. These are read-only
+   endpoints that the web page uses to display the tables. They are in
+   a SEPARATE controller on purpose, so that OrderController stays
+   exactly as written in the document. Only queries live here, which
+   also matches the CQS idea from Program 6.
+
+7. static/index.html   (new file)
+   The web page. A form to place an order, a stock table, a step-by-
+   step display of what the saga did, and a list of orders. It only
+   calls the REST endpoints; it contains no business logic.
+
+8. jakarta.persistence instead of javax.persistence
+   Spring Boot 3 uses the Jakarta namespace. Using javax would not
+   compile. This applies to the imports in Order.java and Product.java.
+
+9. @Table(name = "orders") on the Order entity
+   This was already in the document, and the reason is worth knowing:
+   ORDER is a reserved SQL keyword, so a table literally named "order"
+   causes a syntax error.
+
+NOTHING ELSE WAS CHANGED. No method bodies, no conditions, no return
+values, no print text.
+
+
+===========================================================
+ DEMONSTRATION SCRIPT
+===========================================================
+
+SUCCESS CASE
+  Product 101, quantity 1, price 1500.
+  Console shows : Payment successful: Rs.1500.0
+  Response      : status CONFIRMED
+  Stock         : 10 -> 9
+
+  Request:
+    POST /orders
+    { "productId": 101, "quantity": 1, "amount": 1500 }
+
+  Response:
+    { "id":1, "productId":101, "quantity":1,
+      "amount":1500.0, "status":"CONFIRMED" }
+
+
+FAILURE AND COMPENSATION CASE
+  Product 101, quantity 50 (more than the 10 in stock).
+  Console shows : Payment successful: Rs.75000.0
+                  Payment refunded: Rs.75000.0
+  Response      : status CANCELLED
+  Stock         : unchanged
+
+  Request:
+    POST /orders
+    { "productId": 101, "quantity": 50, "amount": 75000 }
+
+  Response:
+    { "id":2, "productId":101, "quantity":50,
+      "amount":75000.0, "status":"CANCELLED" }
+
+  Point this out while demonstrating: the payment SUCCEEDED and then was
+  refunded. It was not prevented. That is the whole idea of a saga - you
+  go forward optimistically and undo backwards when a later step fails.
+
+
+===========================================================
+ LIKELY VIVA QUESTIONS
+===========================================================
+
+Q. Why not just put @Transactional on placeOrder()?
+A. Because the payment is an external system. A database transaction
+   cannot roll back money that has already left. Also, wrapping all
+   four steps would hide the intermediate PAID state, which is the
+   state reconciliation would later need to detect.
+
+Q. What is the difference between rollback and compensation?
+A. Rollback is done by the database, automatically, and leaves no
+   trace. Compensation is a business operation written by the
+   developer, it runs after the original already committed, and both
+   operations remain visible in the records.
+
+Q. Where is eventual consistency in this project?
+A. In the window between the payment committing and the refund
+   completing. During that time the order data and the payment data
+   disagree. They agree again once compensation finishes.
+
+Q. Why does reserveStock return boolean instead of throwing?
+A. Insufficient stock is an expected business outcome, not a technical
+   fault. Returning false lets the saga branch into compensation
+   cleanly instead of using exception handling for control flow.
+
+Q. What happens if the refund itself fails?
+A. In this simple version, nothing - the order would be stuck at PAID.
+   That is precisely the case Program 10 (reconciliation) handles: a
+   background job scans for orders left in an intermediate state and
+   repairs them. Retry (Program 9) would also be used here.
+
+Q. Is this orchestration or choreography?
+A. Orchestration. SagaService is a central coordinator that explicitly
+   calls each service. In choreography there would be no coordinator -
+   each service would publish events and others would react to them.
+
+Q. Which programs use @Transactional and which do not?
+A. OrderService and InventoryService use it, because they write to our
+   own database and need atomicity. PaymentService does not, because it
+   does not touch the database. SagaService does not, deliberately, so
+   each step commits independently. OrderController does not, because
+   it holds no logic.
